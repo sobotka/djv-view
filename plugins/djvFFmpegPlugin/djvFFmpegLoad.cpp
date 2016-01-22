@@ -196,18 +196,13 @@ void djvFFmpegLoad::open(const djvFileInfo & in, djvImageIoInfo & info)
     //DJV_DEBUG_PRINT("duration = " << static_cast<qint64>(duration));
     //DJV_DEBUG_PRINT("speed = " << speed);
 
-    int64_t nbFrames = 0;
-    
-    if (avStream->nb_frames != 0)
-    {
-        nbFrames = avStream->nb_frames;
-    }
-    else
-    {
-        nbFrames =
-            duration / static_cast<double>(AV_TIME_BASE) *
-            djvSpeed::speedToFloat(speed);
-    }
+    // Many codecs will not return correct values for nbFrames, and as
+    // such, we make our estimate based on overall duration and frame
+    // rate. This of course may fail, but it will fail much less frequently
+    // than relying on nbFrames.
+    int64_t nbFrames = ceil(_avFormatContext->duration *
+                            av_q2d(avStream->r_frame_rate) /
+                            AV_TIME_BASE);
     
     if (! nbFrames)
     {
@@ -269,20 +264,23 @@ void djvFFmpegLoad::read(djvImage & image, const djvImageIoFrameInfo & frame)
     AVStream * avStream = _avFormatContext->streams[_avVideoStream];
     
     int64_t pts = 0;
-        
+
+    if (f >= _info.sequence.frames.count() - 1)
+    {
+        f = 1;
+    }
+
     if (f != _frame + 1)
     {
         const int64_t seek =
-            (f * _info.sequence.speed.duration()) /
-            static_cast<double>(_info.sequence.speed.scale()) *
-            AV_TIME_BASE;
+                f * avStream->r_frame_rate.den;
 
         //DJV_DEBUG_PRINT("seek = " << static_cast<qint64>(seek));
 
         int r = av_seek_frame(
             _avFormatContext,
             _avVideoStream,
-            av_rescale_q(seek, djvFFmpeg::timeBaseQ(), avStream->time_base),
+            seek,
             AVSEEK_FLAG_BACKWARD);
         
         //DJV_DEBUG_PRINT("r = " << djvFFmpeg::toString(r));
@@ -364,15 +362,15 @@ void djvFFmpegLoad::close() throw (djvError)
 bool djvFFmpegLoad::readFrame(int64_t & pts)
 {
     //DJV_DEBUG("djvFFmpegLoad::readFrame");
-        
+
     djvFFmpeg::Packet packet;
 
     int finished = 0;
-    
+
     while (! finished)
     {
         int r = av_read_frame(_avFormatContext, &packet());
-                        
+
         //DJV_DEBUG_PRINT("packet");
         //DJV_DEBUG_PRINT("  size = " << static_cast<qint64>(packet().size));
         //DJV_DEBUG_PRINT("  pos = " << static_cast<qint64>(packet().pos));
@@ -384,7 +382,7 @@ bool djvFFmpegLoad::readFrame(int64_t & pts)
         //DJV_DEBUG_PRINT("  corrupt = " <<
         //    (packet().flags & AV_PKT_FLAG_CORRUPT));
         //DJV_DEBUG_PRINT("  r = " << djvFFmpeg::toString(r));
-    
+
         if (r < 0)
         {
             packet().data = 0;
@@ -399,21 +397,14 @@ bool djvFFmpegLoad::readFrame(int64_t & pts)
                 &finished,
                 &packet()) <= 0)
             {
-                break;
             }
         }
-    }
 
-    pts = _avFrame->pkt_pts;
-    
-    //DJV_DEBUG_PRINT("pts = " << static_cast<qint64>(pts));
-    
-    pts = av_rescale_q(
-        pts,
-        _avFormatContext->streams[_avVideoStream]->time_base,
-        djvFFmpeg::timeBaseQ());
-    
-    //DJV_DEBUG_PRINT("pts = " << static_cast<qint64>(pts));
-        
+        av_free_packet(&packet());
+    }
+    pts = av_frame_get_best_effort_timestamp(_avFrame);
+
+//    //DJV_DEBUG_PRINT("pts = " << static_cast<qint64>(pts));
+
     return finished;
 }
